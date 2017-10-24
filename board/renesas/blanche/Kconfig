@@ -9,4 +9,8 @@ config SYS_VENDOR
 config SYS_CONFIG_NAME
 	default "blanche"
 
+config SYS_TEXT_BASE
+	default 0x00000000 if MTD_NOR_FLASH
+	default 0x40000000
+
 endif

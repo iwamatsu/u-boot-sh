@@ -9,6 +9,10 @@ config SYS_VENDOR
 config SYS_CONFIG_NAME
 	default "alt"
 
+config SYS_TEXT_BASE
+	default 0x70000000 if RMOBILE_EXTRAM_BOOT
+	default 0xE6304000
+
 config R8A7794_ETHERNET_B
 	bool "Use ethernet B function"
 	depends on TARGET_ALT

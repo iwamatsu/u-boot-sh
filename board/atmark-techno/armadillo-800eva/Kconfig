@@ -9,4 +9,6 @@ config SYS_VENDOR
 config SYS_CONFIG_NAME
 	default "armadillo-800eva"
 
+config SYS_TEXT_BASE
+	default 0xE80C0000
 endif

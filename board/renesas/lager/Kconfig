@@ -9,4 +9,8 @@ config SYS_VENDOR
 config SYS_CONFIG_NAME
 	default "lager"
 
+config SYS_TEXT_BASE
+	default 0xB0000000 if RMOBILE_EXTRAM_BOOT
+	default 0xE8080000
+
 endif
