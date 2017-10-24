@@ -12,7 +12,6 @@
 
 #undef DEBUG
 #define CONFIG_R8A7792
-#define CONFIG_RMOBILE_BOARD_STRING "Blanche"
 
 #include "rcar-gen2-common.h"
 

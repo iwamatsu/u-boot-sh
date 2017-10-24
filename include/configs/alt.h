@@ -12,7 +12,6 @@
 
 #undef DEBUG
 #define CONFIG_R8A7794
-#define CONFIG_ARCH_RMOBILE_BOARD_STRING "Alt"
 
 #include "rcar-gen2-common.h"
 

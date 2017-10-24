@@ -11,7 +11,6 @@
 
 #undef DEBUG
 #define CONFIG_R8A7793
-#define CONFIG_ARCH_RMOBILE_BOARD_STRING "Gose"
 
 #include "rcar-gen2-common.h"
 
