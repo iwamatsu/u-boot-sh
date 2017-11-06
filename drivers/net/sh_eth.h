@@ -91,6 +91,10 @@ struct sh_eth_info {
 	struct eth_device *dev;
 	struct phy_device *phydev;
 	void __iomem *iobase;
+#ifdef CONFIG_DM_ETH
+	struct mii_dev *miibus;
+	u8 phy_interface;
+#endif
 };
 
 struct sh_eth_dev {

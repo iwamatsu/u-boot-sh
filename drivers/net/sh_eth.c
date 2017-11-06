@@ -2,7 +2,7 @@
  * sh_eth.c - Driver for Renesas ethernet controller.
  *
  * Copyright (C) 2008, 2011 Renesas Solutions Corp.
- * Copyright (c) 2008, 2011, 2014 2014 Nobuhiro Iwamatsu
+ * Copyright (c) 2008, 2011, 2014, 2017 Nobuhiro Iwamatsu
  * Copyright (c) 2007 Carlos Munoz <carlos@kenati.com>
  * Copyright (C) 2013, 2014 Renesas Electronics Corporation
  *
@@ -17,6 +17,8 @@
 #include <miiphy.h>
 #include <linux/errno.h>
 #include <asm/io.h>
+#include <dm.h>
+#include <dm/platform_data/eth_sh.h>
 
 #include "sh_eth.h"
 
@@ -53,11 +55,28 @@
 
 #define TIMEOUT_CNT 1000
 
-int sh_eth_send(struct eth_device *dev, void *packet, int len)
+int __sh_eth_write_hwaddr(struct sh_eth_info *port_info, u8 *mac)
 {
-	struct sh_eth_dev *eth = dev->priv;
-	int port = eth->port, ret = 0, timeout;
-	struct sh_eth_info *port_info = &eth->port_info[port];
+	u32 val;
+
+	/* Set Mac address */
+	val = mac[0] << 24 | mac[1] << 16 | mac[2] << 8 | mac[3];
+	sh_eth_write(port_info, val, MAHR);
+
+	val = mac[4] << 8 | mac[5];
+	sh_eth_write(port_info, val, MALR);
+
+	return 0;
+}
+
+static void __sh_eth_stop(struct sh_eth_info *port_info)
+{
+	sh_eth_write(port_info, ~EDRRR_R, EDRRR);
+}
+
+int __sh_eth_send(struct sh_eth_info *port_info, void *packet, int len)
+{
+	int ret = 0, timeout;
 
 	if (!packet || len > 0xffff) {
 		printf(SHETHER_NAME ": %s: Invalid argument\n", __func__);
@@ -67,8 +86,8 @@ int sh_eth_send(struct eth_device *dev, void *packet, int len)
 
 	/* packet must be a 4 byte boundary */
 	if ((int)packet & 3) {
-		printf(SHETHER_NAME ": %s: packet not 4 byte aligned\n"
-				, __func__);
+		printf(SHETHER_NAME ": %s: packet not 4 byte aligned\n",
+		       __func__);
 		ret = -EFAULT;
 		goto err;
 	}
@@ -111,12 +130,9 @@ err:
 	return ret;
 }
 
-int sh_eth_recv(struct eth_device *dev)
+int __sh_eth_recv(struct sh_eth_info *port_info, uchar **packet)
 {
-	struct sh_eth_dev *eth = dev->priv;
-	int port = eth->port, len = 0;
-	struct sh_eth_info *port_info = &eth->port_info[port];
-	uchar *packet;
+	int len = 0;
 
 	/* Check if the rx descriptor is ready */
 	invalidate_cache(port_info->rx_desc_cur, sizeof(struct rx_desc_s));
@@ -124,10 +140,10 @@ int sh_eth_recv(struct eth_device *dev)
 		/* Check for errors */
 		if (!(port_info->rx_desc_cur->rd0 & RD_RFE)) {
 			len = port_info->rx_desc_cur->rd1 & 0xffff;
-			packet = (uchar *)
+			*packet = (uchar *)
 				ADDR_TO_P2(port_info->rx_desc_cur->rd2);
-			invalidate_cache(packet, len);
-			net_process_received_packet(packet, len);
+			invalidate_cache(*packet, len);
+			net_process_received_packet(*packet, len);
 		}
 
 		/* Make current descriptor available again */
@@ -153,44 +169,10 @@ int sh_eth_recv(struct eth_device *dev)
 	return len;
 }
 
-static int sh_eth_reset(struct sh_eth_dev *eth)
+static int sh_eth_tx_desc_init(struct sh_eth_info *port_info)
 {
-	struct sh_eth_info *port_info = &eth->port_info[eth->port];
-#if defined(SH_ETH_TYPE_GETHER) || defined(SH_ETH_TYPE_RZ)
-	int ret = 0, i;
-
-	/* Start e-dmac transmitter and receiver */
-	sh_eth_write(port_info, EDSR_ENALL, EDSR);
-
-	/* Perform a software reset and wait for it to complete */
-	sh_eth_write(port_info, EDMR_SRST, EDMR);
-	for (i = 0; i < TIMEOUT_CNT; i++) {
-		if (!(sh_eth_read(port_info, EDMR) & EDMR_SRST))
-			break;
-		udelay(1000);
-	}
-
-	if (i == TIMEOUT_CNT) {
-		printf(SHETHER_NAME  ": Software reset timeout\n");
-		ret = -EIO;
-	}
-
-	return ret;
-#else
-	sh_eth_write(port_info, sh_eth_read(port_info, EDMR) | EDMR_SRST, EDMR);
-	udelay(3000);
-	sh_eth_write(port_info,
-		     sh_eth_read(port_info, EDMR) & ~EDMR_SRST, EDMR);
-
-	return 0;
-#endif
-}
-
-static int sh_eth_tx_desc_init(struct sh_eth_dev *eth)
-{
-	int port = eth->port, i, ret = 0;
+	int i, ret = 0;
 	u32 alloc_desc_size = NUM_TX_DESC * sizeof(struct tx_desc_s);
-	struct sh_eth_info *port_info = &eth->port_info[port];
 	struct tx_desc_s *cur_tx_desc;
 
 	/*
@@ -239,11 +221,10 @@ err:
 	return ret;
 }
 
-static int sh_eth_rx_desc_init(struct sh_eth_dev *eth)
+static int sh_eth_rx_desc_init(struct sh_eth_info *port_info)
 {
-	int port = eth->port, i, ret = 0;
+	int i, ret = 0;
 	u32 alloc_desc_size = NUM_RX_DESC * sizeof(struct rx_desc_s);
-	struct sh_eth_info *port_info = &eth->port_info[port];
 	struct rx_desc_s *cur_rx_desc;
 	u8 *rx_buf;
 
@@ -312,22 +293,16 @@ err:
 	return ret;
 }
 
-static void sh_eth_tx_desc_free(struct sh_eth_dev *eth)
+static void sh_eth_tx_desc_free(struct sh_eth_info *port_info)
 {
-	int port = eth->port;
-	struct sh_eth_info *port_info = &eth->port_info[port];
-
 	if (port_info->tx_desc_alloc) {
 		free(port_info->tx_desc_alloc);
 		port_info->tx_desc_alloc = NULL;
 	}
 }
 
-static void sh_eth_rx_desc_free(struct sh_eth_dev *eth)
+static void sh_eth_rx_desc_free(struct sh_eth_info *port_info)
 {
-	int port = eth->port;
-	struct sh_eth_info *port_info = &eth->port_info[port];
-
 	if (port_info->rx_desc_alloc) {
 		free(port_info->rx_desc_alloc);
 		port_info->rx_desc_alloc = NULL;
@@ -339,32 +314,64 @@ static void sh_eth_rx_desc_free(struct sh_eth_dev *eth)
 	}
 }
 
-static int sh_eth_desc_init(struct sh_eth_dev *eth)
+static int sh_eth_desc_init(struct sh_eth_info *port_info)
 {
 	int ret = 0;
 
-	ret = sh_eth_tx_desc_init(eth);
+	ret = sh_eth_tx_desc_init(port_info);
 	if (ret)
 		goto err_tx_init;
 
-	ret = sh_eth_rx_desc_init(eth);
+	ret = sh_eth_rx_desc_init(port_info);
 	if (ret)
 		goto err_rx_init;
 
 	return ret;
+
 err_rx_init:
-	sh_eth_tx_desc_free(eth);
+	sh_eth_tx_desc_free(port_info);
 
 err_tx_init:
 	return ret;
 }
 
-static int sh_eth_phy_config(struct sh_eth_dev *eth)
+#ifdef CONFIG_DM_ETH
+static int sh_eth_write_hwaddr(struct udevice *dev)
 {
-	int port = eth->port, ret = 0;
-	struct sh_eth_info *port_info = &eth->port_info[port];
-	struct eth_device *dev = port_info->dev;
+	struct sh_eth_pdata *pdata = dev_get_platdata(dev);
+	struct sh_eth_info *port_info = dev_get_priv(dev);
+	u8 *mac = pdata->eth_pdata.enetaddr;
+
+	return __sh_eth_write_hwaddr(port_info, mac);
+}
+
+static int sh_eth_phy_config(struct udevice *dev)
+{
 	struct phy_device *phydev;
+	struct sh_eth_info *port_info = dev_get_priv(dev);
+
+	phydev = phy_connect(port_info->miibus, port_info->phy_addr, dev,
+			     port_info->phy_interface);
+	port_info->phydev = phydev;
+	phy_config(phydev);
+
+	return 0;
+}
+
+#else
+
+static int sh_eth_write_hwaddr(struct eth_device *dev)
+{
+	struct sh_eth_dev *eth = dev->priv;
+	struct sh_eth_info *port_info = &eth->port_info[eth->port];
+
+	return __sh_eth_write_hwaddr(port_info, dev->enetaddr);
+}
+
+static int sh_eth_phy_config(struct sh_eth_info *port_info)
+{
+	struct phy_device *phydev;
+	struct eth_device *dev = port_info->dev;
 
 	phydev = phy_connect(
 			miiphy_get_dev_by_name(dev->name),
@@ -372,16 +379,24 @@ static int sh_eth_phy_config(struct sh_eth_dev *eth)
 	port_info->phydev = phydev;
 	phy_config(phydev);
 
-	return ret;
+	return 0;
 }
+#endif
 
-static int sh_eth_config(struct sh_eth_dev *eth)
+#ifdef CONFIG_DM_ETH
+static int sh_eth_config(struct udevice *dev)
+#else
+static int sh_eth_config(struct sh_eth_info *port_info)
+#endif
 {
-	int port = eth->port, ret = 0;
+	int ret = 0;
 	u32 val;
-	struct sh_eth_info *port_info = &eth->port_info[port];
-	struct eth_device *dev = port_info->dev;
 	struct phy_device *phy;
+#ifdef CONFIG_DM_ETH
+	struct sh_eth_info *port_info = dev_get_priv(dev);
+#else
+	struct eth_device *dev = port_info->dev;
+#endif
 
 	/* Configure e-dmac registers */
 	sh_eth_write(port_info, (sh_eth_read(port_info, EDMR) & ~EMDR_DESC_R) |
@@ -400,13 +415,7 @@ static int sh_eth_config(struct sh_eth_dev *eth)
 	/* Configure e-mac registers */
 	sh_eth_write(port_info, 0, ECSIPR);
 
-	/* Set Mac address */
-	val = dev->enetaddr[0] << 24 | dev->enetaddr[1] << 16 |
-	    dev->enetaddr[2] << 8 | dev->enetaddr[3];
-	sh_eth_write(port_info, val, MAHR);
-
-	val = dev->enetaddr[4] << 8 | dev->enetaddr[5];
-	sh_eth_write(port_info, val, MALR);
+	sh_eth_write_hwaddr(dev);
 
 	sh_eth_write(port_info, RFLR_RFL_MIN, RFLR);
 #if defined(SH_ETH_TYPE_GETHER)
@@ -425,7 +434,11 @@ static int sh_eth_config(struct sh_eth_dev *eth)
 	sh_eth_write(port_info, sh_eth_read(port_info, RMIIMR) | 0x1, RMIIMR);
 #endif
 	/* Configure phy */
-	ret = sh_eth_phy_config(eth);
+#ifdef CONFIG_DM_ETH
+	ret = sh_eth_phy_config(dev);
+#else
+	ret = sh_eth_phy_config(port_info);
+#endif
 	if (ret) {
 		printf(SHETHER_NAME ": phy config timeout\n");
 		goto err_phy_cfg;
@@ -485,10 +498,41 @@ err_phy_cfg:
 	return ret;
 }
 
-static void sh_eth_start(struct sh_eth_dev *eth)
+static int sh_eth_reset(struct sh_eth_info *port_info)
 {
-	struct sh_eth_info *port_info = &eth->port_info[eth->port];
+#if defined(SH_ETH_TYPE_GETHER) || defined(SH_ETH_TYPE_RZ)
+	int ret = 0, i;
 
+	/* Start e-dmac transmitter and receiver */
+	sh_eth_write(port_info, EDSR_ENALL, EDSR);
+
+	/* Perform a software reset and wait for it to complete */
+	sh_eth_write(port_info, EDMR_SRST, EDMR);
+	for (i = 0; i < TIMEOUT_CNT; i++) {
+		if (!(sh_eth_read(port_info, EDMR) & EDMR_SRST))
+			break;
+		udelay(1000);
+	}
+
+	if (i == TIMEOUT_CNT) {
+		printf(SHETHER_NAME  ": Software reset timeout\n");
+		ret = -EIO;
+	}
+
+	return ret;
+#else
+	sh_eth_write(port_info,
+		     sh_eth_read(port_info, EDMR) | EDMR_SRST, EDMR);
+	udelay(3000);
+	sh_eth_write(port_info,
+		     sh_eth_read(port_info, EDMR) & ~EDMR_SRST, EDMR);
+
+	return 0;
+#endif
+}
+
+static void __sh_eth_start(struct sh_eth_info *port_info)
+{
 	/*
 	 * Enable the e-dmac receiver only. The transmitter will be enabled when
 	 * we have something to transmit
@@ -496,38 +540,172 @@ static void sh_eth_start(struct sh_eth_dev *eth)
 	sh_eth_write(port_info, EDRRR_R, EDRRR);
 }
 
-static void sh_eth_stop(struct sh_eth_dev *eth)
+int __sh_eth_init(struct sh_eth_info *port_info)
 {
+	int ret = 0;
+
+	ret = sh_eth_reset(port_info);
+	if (ret)
+		return ret;
+
+	ret = sh_eth_desc_init(port_info);
+	if (ret)
+		return ret;
+	return ret;
+}
+
+#ifdef CONFIG_DM_ETH
+
+static int sh_eth_send(struct udevice *dev, void *packet, int length)
+{
+	return __sh_eth_send(dev_get_priv(dev), packet, length);
+}
+
+static int sh_eth_free_pkt(struct udevice *dev, uchar *packet, int length)
+{
+	/* FIX ME */
+	return 0;
+}
+
+static int sh_eth_recv(struct udevice *dev, int flags, uchar **packetp)
+{
+	return __sh_eth_recv(dev_get_priv(dev), packetp);
+}
+
+static int sh_eth_start(struct udevice *dev)
+{
+	int ret = 0;
+
+	ret = __sh_eth_init(dev_get_priv(dev));
+	if (ret)
+		goto err;
+
+	ret = sh_eth_config(dev);
+	if (ret)
+		goto err_config;
+
+	__sh_eth_start(dev_get_priv(dev));
+
+	return ret;
+
+err_config:
+	sh_eth_tx_desc_free(dev_get_priv(dev));
+	sh_eth_rx_desc_free(dev_get_priv(dev));
+
+err:
+	return ret;
+}
+
+static void sh_eth_stop(struct udevice *dev)
+{
+	__sh_eth_stop(dev_get_priv(dev));
+}
+
+static int sh_eth_probe(struct udevice *dev)
+{
+	struct sh_eth_pdata *pdata = dev_get_platdata(dev);
+	struct sh_eth_info *port_info = dev_get_priv(dev);
+	int ret = 0;
+
+	port_info->iobase = map_physmem(pdata->eth_pdata.iobase,
+					0x400, MAP_NOCACHE);
+	port_info->phy_addr = pdata->phy_addr;
+	port_info->phy_interface = pdata->eth_pdata.phy_interface;
+
+	port_info->miibus = mdio_alloc();
+	if (!port_info->miibus) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	strncpy(port_info->miibus->name, dev->name, MDIO_NAME_LEN);
+	port_info->miibus->read = bb_miiphy_read;
+	port_info->miibus->write = bb_miiphy_write;
+	bb_miiphy_buses[0].priv = port_info;
+
+	ret = mdio_register(port_info->miibus);
+	if (ret < 0)
+		goto err_mdio_register;
+	port_info->miibus = miiphy_get_dev_by_name(dev->name);
+
+	return 0;
+
+err_mdio_register:
+	mdio_free(port_info->miibus);
+err:
+	return ret;
+}
+
+static int sh_eth_remove(struct udevice *dev)
+{
+	struct sh_eth_info *port_info = dev_get_priv(dev);
+
+	free(port_info->phydev);
+	mdio_unregister(port_info->miibus);
+	mdio_free(port_info->miibus);
+	unmap_physmem(port_info->iobase, MAP_NOCACHE);
+
+	return 0;
+}
+
+static const struct eth_ops sh_eth_ops = {
+	.start		= sh_eth_start,
+	.stop		= sh_eth_stop,
+	.send		= sh_eth_send,
+	.recv		= sh_eth_recv,
+	.free_pkt	= sh_eth_free_pkt,
+	.write_hwaddr	= sh_eth_write_hwaddr,
+};
+
+U_BOOT_DRIVER(sh_eth) = {
+	.name		= "sh_eth",
+	.id		= UCLASS_ETH,
+	.probe		= sh_eth_probe,
+	.remove		= sh_eth_remove,
+	.ops		= &sh_eth_ops,
+	.priv_auto_alloc_size	= sizeof(struct sh_eth_info),
+	.platdata_auto_alloc_size	= sizeof(struct sh_eth_pdata),
+};
+
+#else
+
+int sh_eth_send(struct eth_device *dev, void *packet, int len)
+{
+	struct sh_eth_dev *eth = dev->priv;
 	struct sh_eth_info *port_info = &eth->port_info[eth->port];
 
-	sh_eth_write(port_info, ~EDRRR_R, EDRRR);
+	return __sh_eth_send(port_info, packet, len);
+}
+
+int sh_eth_recv(struct eth_device *dev)
+{
+	struct sh_eth_dev *eth = dev->priv;
+	struct sh_eth_info *port_info = &eth->port_info[eth->port];
+	uchar *packet;
+
+	return __sh_eth_recv(port_info, &packet);
 }
 
 int sh_eth_init(struct eth_device *dev, bd_t *bd)
 {
 	int ret = 0;
 	struct sh_eth_dev *eth = dev->priv;
+	struct sh_eth_info *port_info = &eth->port_info[eth->port];
 
-	ret = sh_eth_reset(eth);
+	ret = __sh_eth_init(port_info);
 	if (ret)
 		goto err;
 
-	ret = sh_eth_desc_init(eth);
-	if (ret)
-		goto err;
-
-	ret = sh_eth_config(eth);
+	ret = sh_eth_config(port_info);
 	if (ret)
 		goto err_config;
 
-	sh_eth_start(eth);
+	__sh_eth_start(port_info);
 
 	return ret;
-
 err_config:
-	sh_eth_tx_desc_free(eth);
-	sh_eth_rx_desc_free(eth);
-
+	sh_eth_tx_desc_free(port_info);
+	sh_eth_rx_desc_free(port_info);
 err:
 	return ret;
 }
@@ -535,8 +713,9 @@ err:
 void sh_eth_halt(struct eth_device *dev)
 {
 	struct sh_eth_dev *eth = dev->priv;
+	struct sh_eth_info *port_info = &eth->port_info[eth->port];
 
-	sh_eth_stop(eth);
+	__sh_eth_stop(port_info);
 }
 
 int sh_eth_initialize(bd_t *bd)
@@ -573,6 +752,7 @@ int sh_eth_initialize(bd_t *bd)
 	dev->halt = sh_eth_halt;
 	dev->send = sh_eth_send;
 	dev->recv = sh_eth_recv;
+	dev->write_hwaddr = sh_eth_write_hwaddr;
 	eth->port_info[eth->port].dev = dev;
 
 	strcpy(dev->name, SHETHER_NAME);
@@ -588,9 +768,9 @@ int sh_eth_initialize(bd_t *bd)
 	mdiodev->read = bb_miiphy_read;
 	mdiodev->write = bb_miiphy_write;
 
-	retl = mdio_register(mdiodev);
+	ret = mdio_register(mdiodev);
 	if (ret < 0)
-		return retval;
+		return ret;
 
 	if (!eth_env_get_enetaddr("ethaddr", dev->enetaddr))
 		puts("Please set MAC address\n");
@@ -608,6 +788,8 @@ err:
 	return ret;
 }
 
+#endif
+
 /******* for bb_miiphy *******/
 static int sh_eth_bb_init(struct bb_miiphy_bus *bus)
 {
@@ -616,9 +798,12 @@ static int sh_eth_bb_init(struct bb_miiphy_bus *bus)
 
 static int sh_eth_bb_mdio_active(struct bb_miiphy_bus *bus)
 {
+#ifdef CONFIG_DM_ETH
+	struct sh_eth_info *port_info = bus->priv;
+#else
 	struct sh_eth_dev *eth = bus->priv;
 	struct sh_eth_info *port_info = &eth->port_info[eth->port];
-
+#endif
 	sh_eth_write(port_info, sh_eth_read(port_info, PIR) | PIR_MMD, PIR);
 
 	return 0;
@@ -626,9 +811,12 @@ static int sh_eth_bb_mdio_active(struct bb_miiphy_bus *bus)
 
 static int sh_eth_bb_mdio_tristate(struct bb_miiphy_bus *bus)
 {
+#ifdef CONFIG_DM_ETH
+	struct sh_eth_info *port_info = bus->priv;
+#else
 	struct sh_eth_dev *eth = bus->priv;
 	struct sh_eth_info *port_info = &eth->port_info[eth->port];
-
+#endif
 	sh_eth_write(port_info, sh_eth_read(port_info, PIR) & ~PIR_MMD, PIR);
 
 	return 0;
@@ -636,9 +824,12 @@ static int sh_eth_bb_mdio_tristate(struct bb_miiphy_bus *bus)
 
 static int sh_eth_bb_set_mdio(struct bb_miiphy_bus *bus, int v)
 {
+#ifdef CONFIG_DM_ETH
+	struct sh_eth_info *port_info = bus->priv;
+#else
 	struct sh_eth_dev *eth = bus->priv;
 	struct sh_eth_info *port_info = &eth->port_info[eth->port];
-
+#endif
 	if (v)
 		sh_eth_write(port_info,
 			     sh_eth_read(port_info, PIR) | PIR_MDO, PIR);
@@ -651,9 +842,12 @@ static int sh_eth_bb_set_mdio(struct bb_miiphy_bus *bus, int v)
 
 static int sh_eth_bb_get_mdio(struct bb_miiphy_bus *bus, int *v)
 {
+#ifdef CONFIG_DM_ETH
+	struct sh_eth_info *port_info = bus->priv;
+#else
 	struct sh_eth_dev *eth = bus->priv;
 	struct sh_eth_info *port_info = &eth->port_info[eth->port];
-
+#endif
 	*v = (sh_eth_read(port_info, PIR) & PIR_MDI) >> 3;
 
 	return 0;
@@ -661,8 +855,12 @@ static int sh_eth_bb_get_mdio(struct bb_miiphy_bus *bus, int *v)
 
 static int sh_eth_bb_set_mdc(struct bb_miiphy_bus *bus, int v)
 {
+#ifdef CONFIG_DM_ETH
+	struct sh_eth_info *port_info = bus->priv;
+#else
 	struct sh_eth_dev *eth = bus->priv;
 	struct sh_eth_info *port_info = &eth->port_info[eth->port];
+#endif
 
 	if (v)
 		sh_eth_write(port_info,
