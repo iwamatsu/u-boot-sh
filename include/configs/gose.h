@@ -10,7 +10,6 @@
 #define __GOSE_H
 
 #undef DEBUG
-#define CONFIG_R8A7793
 
 #include "rcar-gen2-common.h"
 

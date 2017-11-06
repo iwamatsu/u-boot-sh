@@ -13,7 +13,6 @@
 #define __STOUT_H
 
 #undef DEBUG
-#define CONFIG_R8A7790
 
 #include "rcar-gen2-common.h"
 

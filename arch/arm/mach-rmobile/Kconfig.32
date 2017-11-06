@@ -1,52 +1,83 @@
 if RCAR_32
 
+config R8A7740
+	bool
+
+config R8A7790
+	bool
+
+config R8A7791
+	bool
+
+config R8A7792
+	bool
+
+config R8A7793
+	bool
+
+config R8A7794
+	bool
+
+config SH73A0
+	bool
+
 choice
 	prompt "Renesas ARM SoCs board select"
 	optional
 
 config TARGET_ARMADILLO_800EVA
 	bool "armadillo 800 eva board"
+	select R8A7740
 
 config TARGET_BLANCHE
 	bool "Blanche board"
+	select R8A7792
 	select DM
 	select DM_SERIAL
 
 config TARGET_GOSE
 	bool "Gose board"
+	select R8A7793
 	select DM
 	select DM_SERIAL
 
 config TARGET_KOELSCH
 	bool "Koelsch board"
+	select R8A7791
 	select DM
 	select DM_SERIAL
 
 config TARGET_LAGER
 	bool "Lager board"
+	select R8A7790
 	select DM
 	select DM_SERIAL
 
 config TARGET_KZM9G
 	bool "KZM9D board"
+	select SH73A0
 
 config TARGET_ALT
 	bool "Alt board"
+	select R8A7794
 	select DM
 	select DM_SERIAL
 
 config TARGET_SILK
 	bool "Silk board"
+	select R8A7794
 	select DM
 	select DM_SERIAL
 
 config TARGET_PORTER
 	bool "Porter board"
+	select R8A7791
 	select DM
 	select DM_SERIAL
 
 config TARGET_STOUT
 	bool "Stout board"
+	select R8A7790
 	select DM
 	select DM_SERIAL
 

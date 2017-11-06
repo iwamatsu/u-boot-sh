@@ -10,7 +10,6 @@
 #define __KOELSCH_H
 
 #undef DEBUG
-#define CONFIG_R8A7791
 
 #include "rcar-gen2-common.h"
 

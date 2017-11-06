@@ -12,7 +12,6 @@
 #define __SILK_H
 
 #undef DEBUG
-#define CONFIG_R8A7794
 
 #include "rcar-gen2-common.h"
 
